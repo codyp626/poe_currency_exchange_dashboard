@@ -2,6 +2,12 @@
 
 A real-time dashboard for monitoring Path of Exile currency trading opportunities, displaying live data from MongoDB with draggable and customizable widgets.
 
+## Dashboard Preview
+
+![Dashboard Screenshot](screenshots/dashboard.png)
+
+*Live dashboard showing price graphs, market gaps, and cross-currency arbitrage opportunities*
+
 ## Features
 
 - **Real-time Data**: Auto-updates every 5 seconds from MongoDB
