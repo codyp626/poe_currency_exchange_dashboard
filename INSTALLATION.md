@@ -34,7 +34,7 @@
 **Important**: Create a `.env` file in the root directory with the following content:
 
 ```
-MONGO_URI=mongodb+srv://codyprochaska26_db_user:crimson-password@cluster0.8zjezsd.mongodb.net/?appName=Cluster0
+MONGO_URI=mongodb+srv://YOUR_USERNAME:YOUR_PASSWORD@YOUR_CLUSTER.mongodb.net/?appName=Cluster0
 DB_NAME=currency
 COLLECTION_NAME=price_history2
 PORT=5000
