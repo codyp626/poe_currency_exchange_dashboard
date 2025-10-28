@@ -1,0 +1,127 @@
+.dashboard-container {
+  flex: 1;
+  position: relative;
+  overflow: hidden;
+  background: #1a202c;
+}
+
+.widget-toolbar {
+  position: absolute;
+  top: 10px;
+  right: 20px;
+  z-index: 100;
+  display: flex;
+  gap: 10px;
+}
+
+.widget-toolbar button {
+  background: #3d4758;
+  color: #e2e8f0;
+  border: 1px solid #4a5568;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+}
+
+.widget-toolbar button:hover {
+  background: #4a5568;
+  border-color: #68d391;
+}
+
+.widget-area {
+  width: 100%;
+  height: 100%;
+  position: relative;
+}
+
+.widget-wrapper {
+  background: #2d3748;
+  border: 1px solid #4a5568;
+  border-radius: 8px;
+  box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+  display: flex;
+  flex-direction: column;
+  height: 100%;
+  overflow: hidden;
+}
+
+.widget-drag-handle {
+  position: absolute;
+  top: 8px;
+  left: 8px;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  cursor: move;
+  color: #4a5568;
+  background: #3d4758;
+  border-radius: 6px;
+  z-index: 10;
+  transition: all 0.2s;
+  user-select: none;
+}
+
+.widget-drag-handle:hover {
+  color: #68d391;
+  background: #4a5568;
+}
+
+.widget-close {
+  position: absolute;
+  top: 8px;
+  right: 8px;
+  background: #3d4758;
+  border: none;
+  color: #a0aec0;
+  font-size: 1.5rem;
+  cursor: pointer;
+  padding: 0;
+  width: 28px;
+  height: 28px;
+  display: flex;
+  align-items: center;
+  justify-content: center;
+  border-radius: 6px;
+  transition: all 0.2s;
+  z-index: 10;
+}
+
+.widget-close:hover {
+  background: #f56565;
+  color: #fff;
+}
+
+/* Resize handles */
+.react-resizable-handle {
+  position: absolute;
+  width: 12px;
+  height: 12px;
+  background: #4a5568;
+  border: 2px solid #2d3748;
+  border-radius: 2px;
+  z-index: 10;
+}
+
+.react-resizable-handle-se {
+  right: 2px;
+  bottom: 2px;
+  cursor: se-resize;
+}
+
+.react-resizable-handle:hover {
+  background: #68d391;
+  border-color: #68d391;
+}
+
+.react-resizable {
+  position: relative;
+}
+
+.react-draggable {
+  position: absolute !important;
+}
+
