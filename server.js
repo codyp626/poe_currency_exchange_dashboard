@@ -1,6 +1,7 @@
 const express = require('express');
 const cors = require('cors');
 const { MongoClient } = require('mongodb');
+const path = require('path');
 require('dotenv').config();
 
 const app = express();
@@ -548,6 +549,21 @@ app.get('/api/history/:currency', async (req, res) => {
     console.error('Error fetching history:', error);
     res.status(500).json({ error: 'Failed to fetch history' });
   }
+});
+
+// Serve static files from the React app build directory
+app.use(express.static(path.join(__dirname, 'client/build')));
+
+// API routes (keep these before the catch-all)
+// The API routes are already defined above
+
+// Catch-all handler: send back React's index.html file for any non-API routes
+app.get('*', (req, res) => {
+  // Don't serve index.html for API routes
+  if (req.path.startsWith('/api')) {
+    return res.status(404).json({ error: 'API endpoint not found' });
+  }
+  res.sendFile(path.join(__dirname, 'client/build/index.html'));
 });
 
 app.listen(PORT, () => {
