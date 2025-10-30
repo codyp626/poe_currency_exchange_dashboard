@@ -1,4 +1,4 @@
-import React, { useState, useCallback, useRef } from 'react';
+import React, { useState, useCallback, useRef, useEffect } from 'react';
 import Draggable from 'react-draggable';
 import { Resizable } from 'react-resizable';
 import PriceGraphWidget from './widgets/PriceGraphWidget';
@@ -6,6 +6,8 @@ import PriceIndicatorWidget from './widgets/PriceIndicatorWidget';
 import MarketGapWidget from './widgets/MarketGapWidget';
 import CrossCurrencyGapWidget from './widgets/CrossCurrencyGapWidget';
 import './Dashboard.css';
+
+const STORAGE_KEY = 'poe-dashboard-layout';
 
 const DEFAULT_WIDGET_POSITIONS = {
   'price-graph-0': { x: 50, y: 50, width: 600, height: 400 },
@@ -24,11 +26,33 @@ const WIDGET_TYPES = {
 
 function Dashboard({ chaosData, divineData, clickedTicker, setClickedTicker, onAddWidget }) {
   const [widgets, setWidgets] = useState([]);
+  const [isInitialized, setIsInitialized] = useState(false);
   const nextIdRef = useRef(1);
 
-  // Initialize with default widgets
-  React.useEffect(() => {
-    if (widgets.length === 0) {
+  // Load saved layout from localStorage on mount
+  useEffect(() => {
+    try {
+      const savedLayout = localStorage.getItem(STORAGE_KEY);
+      if (savedLayout) {
+        const parsed = JSON.parse(savedLayout);
+        setWidgets(parsed.widgets || []);
+        nextIdRef.current = parsed.nextId || 1;
+        console.log('✅ Loaded saved dashboard layout');
+      } else {
+        // No saved layout - use defaults
+        const defaultWidgets = [
+          { id: 'price-graph-0', type: WIDGET_TYPES.PRICE_GRAPH, currency: 'mirror', ...DEFAULT_WIDGET_POSITIONS['price-graph-0'] },
+          { id: 'market-gaps-chaos-0', type: WIDGET_TYPES.MARKET_GAPS_CHAOS, ...DEFAULT_WIDGET_POSITIONS['market-gaps-chaos-0'] },
+          { id: 'market-gaps-divine-0', type: WIDGET_TYPES.MARKET_GAPS_DIVINE, ...DEFAULT_WIDGET_POSITIONS['market-gaps-divine-0'] },
+          { id: 'cross-currency-gaps-0', type: WIDGET_TYPES.CROSS_CURRENCY_GAPS, ...DEFAULT_WIDGET_POSITIONS['cross-currency-gaps-0'] },
+        ];
+        setWidgets(defaultWidgets);
+        nextIdRef.current = 1;
+      }
+      setIsInitialized(true);
+    } catch (error) {
+      console.error('Failed to load dashboard layout:', error);
+      // Fallback to defaults on error
       const defaultWidgets = [
         { id: 'price-graph-0', type: WIDGET_TYPES.PRICE_GRAPH, currency: 'mirror', ...DEFAULT_WIDGET_POSITIONS['price-graph-0'] },
         { id: 'market-gaps-chaos-0', type: WIDGET_TYPES.MARKET_GAPS_CHAOS, ...DEFAULT_WIDGET_POSITIONS['market-gaps-chaos-0'] },
@@ -37,8 +61,26 @@ function Dashboard({ chaosData, divineData, clickedTicker, setClickedTicker, onA
       ];
       setWidgets(defaultWidgets);
       nextIdRef.current = 1;
+      setIsInitialized(true);
     }
-  }, [widgets.length]);
+  }, []);
+
+  // Save layout to localStorage whenever widgets change (after initialization)
+  useEffect(() => {
+    if (isInitialized && widgets.length > 0) {
+      try {
+        const layoutData = {
+          widgets,
+          nextId: nextIdRef.current,
+          savedAt: new Date().toISOString()
+        };
+        localStorage.setItem(STORAGE_KEY, JSON.stringify(layoutData));
+        console.log('💾 Dashboard layout saved');
+      } catch (error) {
+        console.error('Failed to save dashboard layout:', error);
+      }
+    }
+  }, [widgets, isInitialized]);
 
   const addWidget = useCallback((type, options = {}) => {
     const id = `${type}-${nextIdRef.current}`;
@@ -86,6 +128,27 @@ function Dashboard({ chaosData, divineData, clickedTicker, setClickedTicker, onA
     ));
   }, []);
 
+  const handleResize = useCallback((id, size) => {
+    setWidgets(prev => prev.map(w => 
+      w.id === id ? { ...w, width: size.width, height: size.height } : w
+    ));
+  }, []);
+
+  const resetLayout = useCallback(() => {
+    if (window.confirm('Reset dashboard to default layout? This cannot be undone.')) {
+      const defaultWidgets = [
+        { id: 'price-graph-0', type: WIDGET_TYPES.PRICE_GRAPH, currency: 'mirror', ...DEFAULT_WIDGET_POSITIONS['price-graph-0'] },
+        { id: 'market-gaps-chaos-0', type: WIDGET_TYPES.MARKET_GAPS_CHAOS, ...DEFAULT_WIDGET_POSITIONS['market-gaps-chaos-0'] },
+        { id: 'market-gaps-divine-0', type: WIDGET_TYPES.MARKET_GAPS_DIVINE, ...DEFAULT_WIDGET_POSITIONS['market-gaps-divine-0'] },
+        { id: 'cross-currency-gaps-0', type: WIDGET_TYPES.CROSS_CURRENCY_GAPS, ...DEFAULT_WIDGET_POSITIONS['cross-currency-gaps-0'] },
+      ];
+      setWidgets(defaultWidgets);
+      nextIdRef.current = 1;
+      localStorage.removeItem(STORAGE_KEY);
+      console.log('🔄 Dashboard layout reset to defaults');
+    }
+  }, []);
+
   const renderWidget = (widget) => {
     switch (widget.type) {
       case WIDGET_TYPES.PRICE_GRAPH:
@@ -105,6 +168,13 @@ function Dashboard({ chaosData, divineData, clickedTicker, setClickedTicker, onA
 
   return (
     <div className="dashboard-container">
+      <button 
+        className="reset-layout-button"
+        onClick={resetLayout}
+        title="Reset dashboard to default layout"
+      >
+        🔄 Reset Layout
+      </button>
       
       <div className="widget-area">
         {widgets.map(widget => (
@@ -113,6 +183,7 @@ function Dashboard({ chaosData, divineData, clickedTicker, setClickedTicker, onA
             id={widget.id}
             onRemove={() => removeWidget(widget.id)}
             onStop={handleStop}
+            onResize={handleResize}
             defaultPosition={{ x: widget.x, y: widget.y }}
             width={widget.width}
             height={widget.height}
@@ -125,18 +196,29 @@ function Dashboard({ chaosData, divineData, clickedTicker, setClickedTicker, onA
   );
 }
 
-function WidgetContainer({ id, onRemove, onStop, children, defaultPosition, width, height }) {
+function WidgetContainer({ id, onRemove, onStop, onResize, children, defaultPosition, width, height }) {
   const [size, setSize] = useState({ width: width || 600, height: height || 400 });
   
   const handleResize = (e, data) => {
-    setSize({ width: data.size.width, height: data.size.height });
+    const newSize = { width: data.size.width, height: data.size.height };
+    setSize(newSize);
+    // Notify parent to save to localStorage
+    if (onResize) {
+      onResize(id, newSize);
+    }
+  };
+  
+  const handleDragStop = (e, data) => {
+    if (onStop) {
+      onStop(id, data);
+    }
   };
   
   return (
     <Draggable 
       handle=".widget-drag-handle"
       defaultPosition={defaultPosition}
-      onStop={onStop}
+      onStop={handleDragStop}
     >
       <div>
         <Resizable

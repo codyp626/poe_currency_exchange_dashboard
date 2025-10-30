@@ -5,6 +5,30 @@
   background: #1a202c;
 }
 
+.reset-layout-button {
+  position: absolute;
+  top: 10px;
+  left: 20px;
+  z-index: 100;
+  background: #3d4758;
+  color: #e2e8f0;
+  border: 1px solid #4a5568;
+  padding: 0.5rem 1rem;
+  border-radius: 6px;
+  cursor: pointer;
+  font-size: 0.9rem;
+  transition: all 0.2s;
+  display: flex;
+  align-items: center;
+  gap: 5px;
+}
+
+.reset-layout-button:hover {
+  background: #4a5568;
+  border-color: #f6ad55;
+  color: #f6ad55;
+}
+
 .widget-toolbar {
   position: absolute;
   top: 10px;

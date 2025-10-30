@@ -118,33 +118,215 @@ function processCurrencyData(data) {
   return processed;
 }
 
-// API endpoint to get latest data
-// Helper function to filter out outliers and get most recent valid data
-function getValidDataWithOutlierProtection(docs) {
-  // STEP 1: Build historical baselines from older documents (skip first 3 to avoid cascading outliers)
-  const historicalBaselines = new Map(); // Map<currencyName, {buys: [], sells: []}>
+// ============================================================================
+// OUTLIER DETECTION - Shared utilities
+// ============================================================================
+
+// Track logged outliers to prevent spam within the same data batch
+const loggedOutliers = new Set();
+let lastMongoTimestamp = null;
+
+// Outlier detection thresholds
+const OUTLIER_CONFIG = {
+  ABSOLUTE_THRESHOLD: 5, // Allow up to 5 chaos/divine change regardless of percentage
+  PERCENTAGE_THRESHOLD: 0.5, // 50% change threshold
+  MIN_BASELINE_SIZE: 3, // Need at least 3 historical values to check
+  BASELINE_START_INDEX: 3, // Skip first 3 docs to avoid cascading outliers
+  BASELINE_END_INDEX: 20, // Use up to 20 historical docs for baseline
+};
+
+/**
+ * Calculate median from an array of numbers
+ */
+function calculateMedian(values) {
+  if (values.length === 0) return null;
+  const sorted = [...values].sort((a, b) => a - b);
+  const mid = Math.floor(sorted.length / 2);
+  if (sorted.length % 2 === 0) {
+    return (sorted[mid - 1] + sorted[mid]) / 2;
+  }
+  return sorted[mid];
+}
+
+/**
+ * Build historical baseline from documents
+ * Returns Map<currencyName, {buys: [], sells: []}>
+ */
+function buildHistoricalBaseline(docs, startIndex = OUTLIER_CONFIG.BASELINE_START_INDEX, endIndex = OUTLIER_CONFIG.BASELINE_END_INDEX) {
+  const baselines = new Map();
   
-  // Build baseline from docs 3-20 (avoiding the most recent which might have outliers)
-  for (const doc of docs.slice(3, 20)) {
+  for (const doc of docs.slice(startIndex, Math.min(endIndex, docs.length))) {
     const processed = processCurrencyData(doc.data);
     for (const item of processed) {
-      if (!historicalBaselines.has(item.currency)) {
-        historicalBaselines.set(item.currency, { buys: [], sells: [] });
+      if (!baselines.has(item.currency)) {
+        baselines.set(item.currency, { buys: [], sells: [] });
       }
-      const baseline = historicalBaselines.get(item.currency);
+      const baseline = baselines.get(item.currency);
       if (item.bestBuy !== null) baseline.buys.push(item.bestBuy);
       if (item.bestSell !== null) baseline.sells.push(item.bestSell);
     }
   }
   
-  // Outlier detection thresholds
-  const ABSOLUTE_THRESHOLD = 5; // Allow up to 5 chaos change regardless of percentage
-  const PERCENTAGE_THRESHOLD = 0.5; // 50% change (increased from 30% to be more lenient)
-  const MIN_BASELINE_SIZE = 3; // Need at least 3 historical values to check
+  return baselines;
+}
+
+/**
+ * Attempt to fix common OCR errors where ":1" is read as "31", "41", "51", or just "1"
+ * Returns corrected value if successful, or null if no fix found
+ */
+function attemptOCRFix(price, baselineValues) {
+  if (!price || price === 0 || !baselineValues || baselineValues.length === 0) {
+    return null;
+  }
   
-  // STEP 2: Check the most recent documents (first 3) against the baseline
-  const validData = new Map(); // Map<currencyName, item> - only keep the most recent valid value
+  const priceStr = price.toString();
+  const median = calculateMedian(baselineValues);
+  if (!median || median <= 0) return null;
   
+  // Try all possible suffixes and find the best match
+  const suffixes = ['1', '31', '41', '51'];
+  let bestCandidate = null;
+  let bestDistance = Infinity;
+  
+  for (const suffix of suffixes) {
+    if (priceStr.endsWith(suffix) && priceStr.length > suffix.length) {
+      // Try removing the suffix
+      const withoutSuffix = priceStr.slice(0, -suffix.length);
+      const corrected = parseFloat(withoutSuffix);
+      
+      if (corrected > 0) {
+        const absoluteChange = Math.abs(corrected - median);
+        const percentageChange = median > 0 ? absoluteChange / median : 0;
+        
+        // If corrected value is NOT an outlier, consider it
+        if (absoluteChange <= OUTLIER_CONFIG.ABSOLUTE_THRESHOLD || percentageChange <= OUTLIER_CONFIG.PERCENTAGE_THRESHOLD) {
+          // Use the candidate closest to the median
+          if (absoluteChange < bestDistance) {
+            bestDistance = absoluteChange;
+            bestCandidate = corrected;
+          }
+        }
+      }
+    }
+  }
+  
+  return bestCandidate;
+}
+
+/**
+ * Check if a price is an outlier compared to baseline
+ * Returns { isOutlier: boolean, median: number|null, percentageChange: number, correctedValue: number|null }
+ */
+function checkOutlier(price, baselineValues) {
+  // Zero means OCR failed completely - treat as outlier
+  if (price === 0) {
+    return { isOutlier: true, median: null, percentageChange: 0, correctedValue: null, isZero: true };
+  }
+  
+  if (price === null || !baselineValues || baselineValues.length < OUTLIER_CONFIG.MIN_BASELINE_SIZE) {
+    return { isOutlier: false, median: null, percentageChange: 0, correctedValue: null };
+  }
+  
+  const median = calculateMedian(baselineValues);
+  if (median === null) {
+    return { isOutlier: false, median: null, percentageChange: 0, correctedValue: null };
+  }
+  
+  const absoluteChange = Math.abs(price - median);
+  const percentageChange = median > 0 ? absoluteChange / median : 0;
+  
+  const isOutlier = (
+    absoluteChange > OUTLIER_CONFIG.ABSOLUTE_THRESHOLD && 
+    percentageChange > OUTLIER_CONFIG.PERCENTAGE_THRESHOLD
+  );
+  
+  // If it's an outlier, try to fix common OCR errors
+  let correctedValue = null;
+  if (isOutlier) {
+    correctedValue = attemptOCRFix(price, baselineValues);
+  }
+  
+  return { isOutlier, median, percentageChange, correctedValue };
+}
+
+/**
+ * Process currency data with outlier detection
+ * Returns items with outlier metadata
+ */
+function processDataWithOutlierDetection(item, baseline, currencyName, logOutliers = true) {
+  const result = { ...item, outlierInfo: {} };
+  
+  // Check buy price
+  if (item.bestBuy !== null && baseline) {
+    const buyCheck = checkOutlier(item.bestBuy, baseline.buys);
+    if (buyCheck.isOutlier) {
+      result.outlierInfo.buyOutlier = true;
+      result.outlierInfo.originalBuy = item.bestBuy;
+      result.outlierInfo.medianBuy = buyCheck.median;
+      result.bestBuy = buyCheck.median; // Replace with median
+      
+      if (logOutliers) {
+        const logKey = `${currencyName}-buy`;
+        if (!loggedOutliers.has(logKey)) {
+          console.log(`⚠️  Outlier detected for ${currencyName} buy: ${item.bestBuy} → ${buyCheck.median.toFixed(2)} (${(buyCheck.percentageChange * 100).toFixed(1)}% change)`);
+          loggedOutliers.add(logKey);
+        }
+      }
+    }
+  }
+  
+  // Check sell price
+  if (item.bestSell !== null && baseline) {
+    const sellCheck = checkOutlier(item.bestSell, baseline.sells);
+    if (sellCheck.isOutlier) {
+      result.outlierInfo.sellOutlier = true;
+      result.outlierInfo.originalSell = item.bestSell;
+      result.outlierInfo.medianSell = sellCheck.median;
+      result.bestSell = sellCheck.median; // Replace with median
+      
+      if (logOutliers) {
+        const logKey = `${currencyName}-sell`;
+        if (!loggedOutliers.has(logKey)) {
+          console.log(`⚠️  Outlier detected for ${currencyName} sell: ${item.bestSell} → ${sellCheck.median.toFixed(2)} (${(sellCheck.percentageChange * 100).toFixed(1)}% change)`);
+          loggedOutliers.add(logKey);
+        }
+      }
+    }
+  }
+  
+  // Recalculate market gap with cleaned prices
+  if (result.bestBuy !== null && result.bestSell !== null) {
+    result.marketGap = result.bestSell - result.bestBuy;
+  }
+  
+  return result;
+}
+
+// ============================================================================
+// API ENDPOINT HELPERS
+// ============================================================================
+
+/**
+ * Get latest valid data with outlier protection
+ * Used by /api/data endpoint
+ */
+function getValidDataWithOutlierProtection(docs) {
+  // Clear outlier log on new MongoDB data
+  if (docs.length > 0 && docs[0].time) {
+    const currentTimestamp = docs[0].time.toString();
+    if (currentTimestamp !== lastMongoTimestamp) {
+      loggedOutliers.clear();
+      lastMongoTimestamp = currentTimestamp;
+      console.log(`📊 New MongoDB data detected at ${new Date(docs[0].time).toLocaleString()}`);
+    }
+  }
+  
+  // Build historical baselines from older documents
+  const historicalBaselines = buildHistoricalBaseline(docs);
+  
+  const validData = new Map(); // Map<currencyName, item>
+  
+  // Process most recent 3 documents
   for (let i = 0; i < Math.min(3, docs.length); i++) {
     const doc = docs[i];
     const processed = processCurrencyData(doc.data);
@@ -157,57 +339,16 @@ function getValidDataWithOutlierProtection(docs) {
         continue;
       }
       
-      // Check against historical baseline if available
+      // Get baseline for this currency
       const baseline = historicalBaselines.get(currencyName);
-      let isValid = true;
       
-      if (baseline && baseline.buys.length >= MIN_BASELINE_SIZE && item.bestBuy !== null) {
-        // Use median instead of average for better outlier resistance
-        const sortedBuys = [...baseline.buys].sort((a, b) => a - b);
-        const medianBuy = sortedBuys[Math.floor(sortedBuys.length / 2)];
-        const absoluteChange = Math.abs(item.bestBuy - medianBuy);
-        const percentageChange = medianBuy > 0 ? absoluteChange / medianBuy : 0;
-        
-        if (absoluteChange > ABSOLUTE_THRESHOLD && percentageChange > PERCENTAGE_THRESHOLD) {
-          console.log(`Outlier detected for ${currencyName} buy: ${item.bestBuy} vs median ${medianBuy.toFixed(2)} (${(percentageChange * 100).toFixed(1)}% change)`);
-          isValid = false;
-        }
-      }
+      // Process with outlier detection
+      const processedItem = processDataWithOutlierDetection(item, baseline, currencyName, true);
       
-      if (baseline && baseline.sells.length >= MIN_BASELINE_SIZE && item.bestSell !== null && isValid) {
-        const sortedSells = [...baseline.sells].sort((a, b) => a - b);
-        const medianSell = sortedSells[Math.floor(sortedSells.length / 2)];
-        const absoluteChange = Math.abs(item.bestSell - medianSell);
-        const percentageChange = medianSell > 0 ? absoluteChange / medianSell : 0;
-        
-        if (absoluteChange > ABSOLUTE_THRESHOLD && percentageChange > PERCENTAGE_THRESHOLD) {
-          console.log(`Outlier detected for ${currencyName} sell: ${item.bestSell} vs median ${medianSell.toFixed(2)} (${(percentageChange * 100).toFixed(1)}% change)`);
-          isValid = false;
-        }
-      }
-      
-      // If valid (or no baseline available), use this data
-      if (isValid) {
-        validData.set(currencyName, item);
-      } else if (baseline) {
-        // Use median of baseline as fallback
-        const fallbackItem = { ...item };
-        if (baseline.buys.length >= MIN_BASELINE_SIZE) {
-          const sortedBuys = [...baseline.buys].sort((a, b) => a - b);
-          fallbackItem.bestBuy = sortedBuys[Math.floor(sortedBuys.length / 2)];
-        }
-        if (baseline.sells.length >= MIN_BASELINE_SIZE) {
-          const sortedSells = [...baseline.sells].sort((a, b) => a - b);
-          fallbackItem.bestSell = sortedSells[Math.floor(sortedSells.length / 2)];
-        }
-        fallbackItem.marketGap = fallbackItem.bestSell - fallbackItem.bestBuy;
-        validData.set(currencyName, fallbackItem);
-        console.log(`Using median baseline for ${currencyName}: buy=${fallbackItem.bestBuy}, sell=${fallbackItem.bestSell}`);
-      }
+      validData.set(currencyName, processedItem);
     }
   }
   
-  // Convert Map back to array
   return Array.from(validData.values());
 }
 
@@ -263,58 +404,146 @@ app.get('/api/history/:currency', async (req, res) => {
     // Get ALL documents from the appropriate type, sorted by time
     const docs = await collection.find({ type: documentType }).sort({ time: -1 }).toArray();
     
-    const history = [];
-    let lastBuy = null;
-    let lastSell = null;
+    // Build historical baseline for this specific currency
+    const currencyBaselines = new Map();
     
-    for (const doc of docs) {
-      // Find currency entry using flexible matching
+    // Build baseline from docs 3-50 for more history context
+    for (const doc of docs.slice(OUTLIER_CONFIG.BASELINE_START_INDEX, 50)) {
+      const currencyEntry = findCurrencyEntry(doc.data, currency);
+      if (currencyEntry) {
+        const processed = processCurrencyData([currencyEntry]);
+        if (processed.length > 0) {
+          const item = processed[0];
+          if (!currencyBaselines.has(currency)) {
+            currencyBaselines.set(currency, { buys: [], sells: [] });
+          }
+          const baseline = currencyBaselines.get(currency);
+          if (item.bestBuy !== null) baseline.buys.push(item.bestBuy);
+          if (item.bestSell !== null) baseline.sells.push(item.bestSell);
+        }
+      }
+    }
+    
+    const baseline = currencyBaselines.get(currency);
+    const history = [];
+    
+    // Track last known good values (we process in chronological order - oldest first)
+    let lastValidBuy = null;
+    let lastValidSell = null;
+    
+    // Process documents in chronological order (oldest first) to properly track last valid values
+    const docsChronological = [...docs].reverse();
+    
+    for (const doc of docsChronological) {
       const currencyEntry = findCurrencyEntry(doc.data, currency);
       if (currencyEntry) {
         const processed = processCurrencyData([currencyEntry]);
         if (processed.length > 0) {
           const data = processed[0];
           
-          // Outlier protection: use absolute threshold for low-value items
-          const ABSOLUTE_THRESHOLD = 5; // Allow up to 5 chaos change regardless of percentage
-          const PERCENTAGE_THRESHOLD = 0.5; // 50% for higher value items
+          // Check for outliers
+          const result = { ...data, outlierInfo: {} };
+          let shouldSkipDataPoint = false;
           
-          let isValid = true;
-          if (lastBuy !== null && data.bestBuy !== null) {
-            const absoluteChange = Math.abs(data.bestBuy - lastBuy);
-            const percentageChange = Math.abs((data.bestBuy - lastBuy) / lastBuy);
-            
-            // Only flag as outlier if both absolute change > threshold AND percentage > threshold
-            if (absoluteChange > ABSOLUTE_THRESHOLD && percentageChange > PERCENTAGE_THRESHOLD) {
-              isValid = false;
+          // Check buy price
+          if (data.bestBuy !== null && baseline) {
+            const buyCheck = checkOutlier(data.bestBuy, baseline.buys);
+            if (buyCheck.isOutlier) {
+              result.outlierInfo.buyOutlier = true;
+              result.outlierInfo.originalBuy = data.bestBuy;
+              
+              if (buyCheck.isZero) {
+                // Zero means OCR failed - skip this data point entirely
+                shouldSkipDataPoint = true;
+              } else if (buyCheck.correctedValue !== null) {
+                // Use OCR-corrected value
+                result.bestBuy = buyCheck.correctedValue;
+                result.outlierInfo.buyOCRCorrected = true;
+                result.outlierInfo.correctedBuy = buyCheck.correctedValue;
+                console.log(`🔧 OCR-corrected ${currency} buy: ${data.bestBuy} → ${buyCheck.correctedValue} (stripped misread suffix)`);
+                // Update last valid with corrected value
+                lastValidBuy = buyCheck.correctedValue;
+              } else {
+                // Use last valid buy, or median as fallback
+                const replacementSource = lastValidBuy !== null ? 'last valid' : 'median';
+                result.bestBuy = lastValidBuy !== null ? lastValidBuy : buyCheck.median;
+                result.outlierInfo.replacedBuyWith = result.bestBuy;
+                console.log(`⚠️  ${currency} buy outlier ${data.bestBuy} replaced with ${result.bestBuy} (${replacementSource})`);
+              }
+            } else {
+              // Update last valid buy with this good value
+              lastValidBuy = data.bestBuy;
             }
           }
-          if (lastSell !== null && data.bestSell !== null) {
-            const absoluteChange = Math.abs(data.bestSell - lastSell);
-            const percentageChange = Math.abs((data.bestSell - lastSell) / lastSell);
-            
-            // Only flag as outlier if both absolute change > threshold AND percentage > threshold
-            if (absoluteChange > ABSOLUTE_THRESHOLD && percentageChange > PERCENTAGE_THRESHOLD) {
-              isValid = false;
+          
+          // Check sell price
+          if (data.bestSell !== null && baseline) {
+            const sellCheck = checkOutlier(data.bestSell, baseline.sells);
+            if (sellCheck.isOutlier) {
+              result.outlierInfo.sellOutlier = true;
+              result.outlierInfo.originalSell = data.bestSell;
+              
+              if (sellCheck.isZero) {
+                // Zero means OCR failed - skip this data point entirely
+                shouldSkipDataPoint = true;
+              } else if (sellCheck.correctedValue !== null) {
+                // Use OCR-corrected value
+                result.bestSell = sellCheck.correctedValue;
+                result.outlierInfo.sellOCRCorrected = true;
+                result.outlierInfo.correctedSell = sellCheck.correctedValue;
+                console.log(`🔧 OCR-corrected ${currency} sell: ${data.bestSell} → ${sellCheck.correctedValue} (stripped misread suffix)`);
+                // Update last valid with corrected value
+                lastValidSell = sellCheck.correctedValue;
+              } else {
+                // Use last valid sell, or median as fallback
+                const replacementSource = lastValidSell !== null ? 'last valid' : 'median';
+                result.bestSell = lastValidSell !== null ? lastValidSell : sellCheck.median;
+                result.outlierInfo.replacedSellWith = result.bestSell;
+                console.log(`⚠️  ${currency} sell outlier ${data.bestSell} replaced with ${result.bestSell} (${replacementSource})`);
+              }
+            } else {
+              // Update last valid sell with this good value
+              lastValidSell = data.bestSell;
             }
           }
           
-          if (isValid) {
-            history.push({
-              time: doc.time,
-              data: data
-            });
-            
-            // Update last values
-            if (data.bestBuy !== null) lastBuy = data.bestBuy;
-            if (data.bestSell !== null) lastSell = data.bestSell;
+          // Skip data point if either price is zero (OCR complete failure)
+          if (shouldSkipDataPoint) {
+            console.log(`⚠️  Skipping ${currency} data point due to zero value (OCR failure)`);
+            continue;
           }
+          
+          // Ensure buy < sell (market spread validation)
+          if (result.bestBuy !== null && result.bestSell !== null && result.bestBuy > result.bestSell) {
+            console.log(`🔄 ${currency} buy/sell swapped: buy=${result.bestBuy}, sell=${result.bestSell}. Correcting...`);
+            // Swap them
+            const temp = result.bestBuy;
+            result.bestBuy = result.bestSell;
+            result.bestSell = temp;
+            
+            // Mark as swapped in outlier info
+            result.outlierInfo.swapped = true;
+            
+            // Update last valid values with corrected order
+            lastValidBuy = result.bestBuy;
+            lastValidSell = result.bestSell;
+          }
+          
+          // Recalculate market gap with cleaned prices
+          if (result.bestBuy !== null && result.bestSell !== null) {
+            result.marketGap = result.bestSell - result.bestBuy;
+          }
+          
+          history.push({
+            time: doc.time,
+            data: result
+          });
         }
       }
     }
     
-    // Return all historical data, reversed (oldest first)
-    res.json(history.reverse());
+    // Return all historical data (already in chronological order - oldest first)
+    res.json(history);
   } catch (error) {
     console.error('Error fetching history:', error);
     res.status(500).json({ error: 'Failed to fetch history' });
