@@ -35,6 +35,8 @@ function PriceGraphWidget({ id, currency, onRemove }) {
   const [displayUnit, setDisplayUnit] = useState('Chaos');
   const [brushIndices, setBrushIndices] = useState({ startIndex: 0, endIndex: 0 });
   
+  // Cache for currency data to avoid re-fetching
+  const dataCache = useRef(new Map());
   const brushIndicesRef = useRef(brushIndices);
   brushIndicesRef.current = brushIndices;
 
@@ -142,7 +144,19 @@ function PriceGraphWidget({ id, currency, onRemove }) {
     return null;
   }, [displayUnit]);
 
-  const fetchHistory = useCallback(async (isBackgroundUpdate = false) => {
+  const fetchHistory = useCallback(async (currencyToFetch, isBackgroundUpdate = false) => {
+    // Check cache first for instant loading
+    const cacheKey = currencyToFetch;
+    if (dataCache.current.has(cacheKey) && !isBackgroundUpdate) {
+      const cachedData = dataCache.current.get(cacheKey);
+      setData(cachedData.data);
+      setDisplayUnit(cachedData.displayUnit);
+      setLoading(false);
+      setInitialLoad(false);
+      // Still fetch in background to update cache
+      isBackgroundUpdate = true;
+    }
+    
     if (!isBackgroundUpdate) setLoading(true);
     
     try {
@@ -156,8 +170,8 @@ function PriceGraphWidget({ id, currency, onRemove }) {
       
       let response, useDisplayUnit;
       
-      if (divineMarketCurrencies.includes(selectedCurrency)) {
-        response = await axios.get(`/api/history/${selectedCurrency}?marketType=divine`);
+      if (divineMarketCurrencies.includes(currencyToFetch)) {
+        response = await axios.get(`/api/history/${currencyToFetch}?marketType=divine`);
         useDisplayUnit = 'Divine';
       } else {
         // Determine market based on current prices
@@ -165,8 +179,8 @@ function PriceGraphWidget({ id, currency, onRemove }) {
         const { chaos: chaosData, divine: divineData } = pricesResponse.data;
         const divineInChaos = chaosData.find(item => item.currency === 'Divine Orb')?.bestSell || 200;
         
-        const currencyInChaos = chaosData.find(item => item.currency === selectedCurrency);
-        const currencyInDivine = divineData.find(item => item.currency === selectedCurrency);
+        const currencyInChaos = chaosData.find(item => item.currency === currencyToFetch);
+        const currencyInDivine = divineData.find(item => item.currency === currencyToFetch);
         
         let useMarketType = 'chaos';
         useDisplayUnit = 'Chaos';
@@ -190,7 +204,7 @@ function PriceGraphWidget({ id, currency, onRemove }) {
           }
         }
         
-        response = await axios.get(`/api/history/${selectedCurrency}?marketType=${useMarketType}`);
+        response = await axios.get(`/api/history/${currencyToFetch}?marketType=${useMarketType}`);
         
         // Convert if needed
         if (convertDivineToChaos) {
@@ -231,6 +245,20 @@ function PriceGraphWidget({ id, currency, onRemove }) {
       });
       
       setData(chartData);
+      setDisplayUnit(useDisplayUnit);
+      
+      // Cache the result for fast switching
+      dataCache.current.set(cacheKey, {
+        data: chartData,
+        displayUnit: useDisplayUnit,
+        timestamp: Date.now()
+      });
+      
+      // Limit cache size to prevent memory issues (keep last 10 currencies)
+      if (dataCache.current.size > 10) {
+        const firstKey = dataCache.current.keys().next().value;
+        dataCache.current.delete(firstKey);
+      }
       
       if (shouldInitializeBrush && chartData.length > 0) {
         setBrushIndices({ startIndex: 0, endIndex: chartData.length - 1 });
@@ -248,13 +276,13 @@ function PriceGraphWidget({ id, currency, onRemove }) {
     } finally {
       setLoading(false);
     }
-  }, [selectedCurrency, initialLoad]);
+  }, [initialLoad]);
 
   useEffect(() => {
-    fetchHistory(false);
-    const interval = setInterval(() => fetchHistory(true), 10000);
+    fetchHistory(selectedCurrency, false);
+    const interval = setInterval(() => fetchHistory(selectedCurrency, true), 10000);
     return () => clearInterval(interval);
-  }, [fetchHistory]);
+  }, [selectedCurrency, fetchHistory]);
 
   useEffect(() => {
     if (currency) {
