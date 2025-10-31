@@ -2,6 +2,7 @@ const express = require('express');
 const cors = require('cors');
 const { MongoClient } = require('mongodb');
 const path = require('path');
+const fs = require('fs');
 require('dotenv').config();
 
 const app = express();
@@ -18,6 +19,12 @@ if (isNaN(PORT_NUMBER)) {
 
 app.use(cors());
 app.use(express.json());
+
+// Request logging middleware for debugging
+app.use((req, res, next) => {
+  console.log(`${req.method} ${req.path}`);
+  next();
+});
 
 // MongoDB configuration - MUST be set in .env file
 const MONGO_URI = process.env.MONGO_URI;
@@ -273,13 +280,28 @@ function processDataWithOutlierDetection(item, baseline, currencyName, logOutlie
       result.outlierInfo.buyOutlier = true;
       result.outlierInfo.originalBuy = item.bestBuy;
       result.outlierInfo.medianBuy = buyCheck.median;
-      result.bestBuy = buyCheck.median; // Replace with median
       
-      if (logOutliers) {
-        const logKey = `${currencyName}-buy`;
-        if (!loggedOutliers.has(logKey)) {
-          console.log(`⚠️  Outlier detected for ${currencyName} buy: ${item.bestBuy} → ${buyCheck.median.toFixed(2)} (${(buyCheck.percentageChange * 100).toFixed(1)}% change)`);
-          loggedOutliers.add(logKey);
+      // Use OCR-corrected value if available, otherwise use median
+      if (buyCheck.correctedValue !== null) {
+        result.bestBuy = buyCheck.correctedValue;
+        result.outlierInfo.buyOCRCorrected = true;
+        result.outlierInfo.correctedBuy = buyCheck.correctedValue;
+        
+        if (logOutliers) {
+          const logKey = `${currencyName}-buy`;
+          if (!loggedOutliers.has(logKey)) {
+            console.log(`🔧 OCR-corrected ${currencyName} buy: ${item.bestBuy} → ${buyCheck.correctedValue.toFixed(2)} (stripped misread suffix)`);
+            loggedOutliers.add(logKey);
+          }
+        }
+      } else {
+        result.bestBuy = buyCheck.median; // Replace with median
+        if (logOutliers) {
+          const logKey = `${currencyName}-buy`;
+          if (!loggedOutliers.has(logKey)) {
+            console.log(`⚠️  Outlier detected for ${currencyName} buy: ${item.bestBuy} → ${buyCheck.median.toFixed(2)} (${(buyCheck.percentageChange * 100).toFixed(1)}% change)`);
+            loggedOutliers.add(logKey);
+          }
         }
       }
     }
@@ -292,13 +314,28 @@ function processDataWithOutlierDetection(item, baseline, currencyName, logOutlie
       result.outlierInfo.sellOutlier = true;
       result.outlierInfo.originalSell = item.bestSell;
       result.outlierInfo.medianSell = sellCheck.median;
-      result.bestSell = sellCheck.median; // Replace with median
       
-      if (logOutliers) {
-        const logKey = `${currencyName}-sell`;
-        if (!loggedOutliers.has(logKey)) {
-          console.log(`⚠️  Outlier detected for ${currencyName} sell: ${item.bestSell} → ${sellCheck.median.toFixed(2)} (${(sellCheck.percentageChange * 100).toFixed(1)}% change)`);
-          loggedOutliers.add(logKey);
+      // Use OCR-corrected value if available, otherwise use median
+      if (sellCheck.correctedValue !== null) {
+        result.bestSell = sellCheck.correctedValue;
+        result.outlierInfo.sellOCRCorrected = true;
+        result.outlierInfo.correctedSell = sellCheck.correctedValue;
+        
+        if (logOutliers) {
+          const logKey = `${currencyName}-sell`;
+          if (!loggedOutliers.has(logKey)) {
+            console.log(`🔧 OCR-corrected ${currencyName} sell: ${item.bestSell} → ${sellCheck.correctedValue.toFixed(2)} (stripped misread suffix)`);
+            loggedOutliers.add(logKey);
+          }
+        }
+      } else {
+        result.bestSell = sellCheck.median; // Replace with median
+        if (logOutliers) {
+          const logKey = `${currencyName}-sell`;
+          if (!loggedOutliers.has(logKey)) {
+            console.log(`⚠️  Outlier detected for ${currencyName} sell: ${item.bestSell} → ${sellCheck.median.toFixed(2)} (${(sellCheck.percentageChange * 100).toFixed(1)}% change)`);
+            loggedOutliers.add(logKey);
+          }
         }
       }
     }
@@ -561,7 +598,54 @@ app.get('/api/history/:currency', async (req, res) => {
 });
 
 // Serve static files from the React app build directory
-app.use(express.static(path.join(__dirname, 'client/build')));
+const buildPath = path.join(__dirname, 'client/build');
+
+// Debug: Log current working directory and paths
+console.log(`📁 Current working directory: ${process.cwd()}`);
+console.log(`📁 __dirname: ${__dirname}`);
+console.log(`📁 Looking for build at: ${buildPath}`);
+
+// Check if build directory exists
+if (fs.existsSync(buildPath)) {
+  console.log(`✓ Static files directory found: ${buildPath}`);
+  
+  // List what's in the build directory
+  try {
+    const buildContents = fs.readdirSync(buildPath);
+    console.log(`✓ Build directory contents: ${buildContents.join(', ')}`);
+    
+    // Check for index.html specifically
+    const indexPath = path.join(buildPath, 'index.html');
+    if (fs.existsSync(indexPath)) {
+      console.log(`✓ index.html found at: ${indexPath}`);
+    } else {
+      console.warn(`⚠️  index.html NOT found in build directory`);
+    }
+  } catch (err) {
+    console.error(`❌ Error reading build directory: ${err.message}`);
+  }
+  
+  // Serve static files with explicit options
+  app.use(express.static(buildPath, {
+    index: 'index.html',
+    extensions: ['html']
+  }));
+  console.log(`✓ Static file middleware configured for: ${buildPath}`);
+} else {
+  console.warn(`⚠️  WARNING: Build directory not found at ${buildPath}`);
+  console.warn('⚠️  Frontend will not be served. Make sure to run: npm run build');
+  
+  // Try to see what IS in the client directory
+  const clientPath = path.join(__dirname, 'client');
+  if (fs.existsSync(clientPath)) {
+    try {
+      const clientContents = fs.readdirSync(clientPath);
+      console.log(`📂 Client directory contents: ${clientContents.join(', ')}`);
+    } catch (err) {
+      console.error(`❌ Error reading client directory: ${err.message}`);
+    }
+  }
+}
 
 // API routes (keep these before the catch-all)
 // The API routes are already defined above
@@ -572,7 +656,16 @@ app.get('*', (req, res) => {
   if (req.path.startsWith('/api')) {
     return res.status(404).json({ error: 'API endpoint not found' });
   }
-  res.sendFile(path.join(__dirname, 'client/build/index.html'));
+  
+  const indexPath = path.join(__dirname, 'client/build/index.html');
+  if (fs.existsSync(indexPath)) {
+    res.sendFile(indexPath);
+  } else {
+    res.status(500).json({ 
+      error: 'Frontend not built', 
+      message: 'The React app build directory does not exist. Please run: npm run build'
+    });
+  }
 });
 
 app.listen(PORT_NUMBER, () => {
